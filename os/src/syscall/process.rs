@@ -2,11 +2,12 @@
 use alloc::sync::Arc;
 
 use crate::{
+    config::PAGE_SIZE,
     loader::get_app_data_by_name,
-    mm::{translated_refmut, translated_str},
+    mm::{translated_refmut, translated_str, MapPermission, VirtAddr},
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
-        suspend_current_and_run_next,
+        suspend_current_and_run_next, TaskControlBlock,
     },
 };
 
@@ -102,33 +103,69 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
     // ---- release current PCB automatically
 }
 
-/// YOUR JOB: get time with second and microsecond
-/// HINT: You might reimplement it with virtual memory management.
-/// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+/// get time with second and microsecond
+/// 用 translated_refmut 把 TimeVal 写到用户地址
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
+    trace!("kernel:pid[{}] sys_get_time", current_task().unwrap().pid.0);
+    let us = crate::timer::get_time_us();
+    *translated_refmut(current_user_token(), ts) = TimeVal {
+        sec: us / 1_000_000,
+        usec: us % 1_000_000,
+    };
+    0
 }
 
-/// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
+/// mmap：映射一段虚拟内存
+/// port 的 bit 0/1/2 分别表示 R/W/X，bit 3 及以上非法
+pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
+    trace!("kernel:pid[{}] sys_mmap", current_task().unwrap().pid.0);
+    // start 页对齐
+    if start % PAGE_SIZE != 0 {
+        return -1;
+    }
+    // port 合法：无 bit 3 及以上，且至少有一个权限
+    if port & !0x7 != 0 || port == 0 {
+        return -1;
+    }
+    let mut perm = MapPermission::U;
+    if port & 1 != 0 {
+        perm |= MapPermission::R;
+    }
+    if port & 2 != 0 {
+        perm |= MapPermission::W;
+    }
+    if port & 4 != 0 {
+        perm |= MapPermission::X;
+    }
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    // 检查重叠
+    let start_vpn = VirtAddr::from(start).floor();
+    let end_vpn = VirtAddr::from(start + len).ceil();
+    if inner.memory_set.overlap(start_vpn, end_vpn) {
+        return -1;
+    }
+    inner.memory_set.insert_framed_area(
+        VirtAddr::from(start),
+        VirtAddr::from(start + len),
+        perm,
     );
-    -1
+    0
 }
 
-/// YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+/// munmap：解除一段映射
+pub fn sys_munmap(start: usize, len: usize) -> isize {
+    trace!("kernel:pid[{}] sys_munmap", current_task().unwrap().pid.0);
+    // start 和 len 都必须页对齐
+    if start % PAGE_SIZE != 0 || len % PAGE_SIZE != 0 {
+        return -1;
+    }
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    inner
+        .memory_set
+        .remove_area_with_start_vpn(VirtAddr::from(start).floor());
+    0
 }
 
 /// change data segment size
@@ -141,21 +178,32 @@ pub fn sys_sbrk(size: i32) -> isize {
     }
 }
 
-/// YOUR JOB: Implement spawn.
-/// HINT: fork + exec =/= spawn
-pub fn sys_spawn(_path: *const u8) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+/// spawn：直接创建一个新进程运行指定程序（不复制父进程）
+pub fn sys_spawn(path: *const u8) -> isize {
+    trace!("kernel:pid[{}] sys_spawn", current_task().unwrap().pid.0);
+    let token = current_user_token();
+    let path = translated_str(token, path);
+    if let Some(data) = get_app_data_by_name(path.as_str()) {
+        let new_task = Arc::new(TaskControlBlock::new(data));
+        let new_pid = new_task.pid.0;
+        // 建立父子关系：子进程的 parent 指向当前任务，加入当前任务的 children
+        let parent = current_task().unwrap();
+        new_task.inner_exclusive_access().parent = Some(Arc::downgrade(&parent));
+        let mut parent_inner = parent.inner_exclusive_access();
+        parent_inner.children.push(new_task.clone());
+        drop(parent_inner);
+        add_task(new_task);
+        new_pid as isize
+    } else {
+        -1
+    }
 }
 
-// YOUR JOB: Set task priority.
-pub fn sys_set_priority(_prio: isize) -> isize {
+/// 设置任务优先级（stride 调度）
+pub fn sys_set_priority(prio: isize) -> isize {
     trace!(
-        "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_set_priority",
         current_task().unwrap().pid.0
     );
-    -1
+    current_task().unwrap().set_priority(prio)
 }

@@ -1,7 +1,7 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
+use crate::config::{BIG_STRIDE, TRAP_CONTEXT_BASE};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
@@ -68,6 +68,13 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// 优先级（stride 调度）
+    pub priority: usize,
+    /// 步长 = BIG_STRIDE / priority
+    pub stride: usize,
+    /// 累计值
+    pub pass: usize,
 }
 
 impl TaskControlBlockInner {
@@ -118,6 +125,9 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    priority: 10,
+                    stride: BIG_STRIDE / 10,
+                    pass: 0,
                 })
             },
         };
@@ -191,6 +201,9 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    priority: parent_inner.priority,
+                    stride: parent_inner.stride,
+                    pass: 0,
                 })
             },
         });
@@ -235,6 +248,17 @@ impl TaskControlBlock {
         } else {
             None
         }
+    }
+    /// 设置优先级，返回新的优先级；priority < 2 返回 -1
+    pub fn set_priority(&self, prio: isize) -> isize {
+        if prio < 2 {
+            return -1;
+        }
+        let mut inner = self.inner_exclusive_access();
+        inner.priority = prio as usize;
+        inner.stride = BIG_STRIDE / inner.priority;
+        inner.pass = 0;
+        prio
     }
 }
 
