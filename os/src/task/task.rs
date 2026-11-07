@@ -1,6 +1,6 @@
 //! Types related to task management
 use super::TaskContext;
-use crate::config::TRAP_CONTEXT_BASE;
+use crate::config::{MAX_SYSCALL_NUM, TRAP_CONTEXT_BASE};
 use crate::mm::{
     kernel_stack_position, MapPermission, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE,
 };
@@ -28,6 +28,9 @@ pub struct TaskControlBlock {
 
     /// Program break
     pub program_brk: usize,
+
+    /// 系统调用次数统计
+    pub syscall_times: [u32; MAX_SYSCALL_NUM],
 }
 
 impl TaskControlBlock {
@@ -63,6 +66,7 @@ impl TaskControlBlock {
             base_size: user_sp,
             heap_bottom: user_sp,
             program_brk: user_sp,
+            syscall_times: [0; MAX_SYSCALL_NUM],
         };
         // prepare TrapContext in user space
         let trap_cx = task_control_block.get_trap_cx();
@@ -94,6 +98,24 @@ impl TaskControlBlock {
             Some(old_break)
         } else {
             None
+        }
+    }
+    /// mmap：映射一段虚拟内存，返回 0 成功 / -1 失败
+    pub fn mmap(&mut self, start: VirtAddr, end: VirtAddr, permission: MapPermission) -> isize {
+        let start_vpn = start.floor();
+        let end_vpn = end.ceil();
+        if self.memory_set.overlap(start_vpn, end_vpn) {
+            return -1;
+        }
+        self.memory_set.insert_framed_area(start, end, permission);
+        0
+    }
+    /// munmap：解除一段映射，返回 0 成功 / -1 失败
+    pub fn munmap(&mut self, start: VirtAddr, end: VirtAddr) -> isize {
+        if self.memory_set.remove_area(start, end) {
+            0
+        } else {
+            -1
         }
     }
 }

@@ -15,6 +15,7 @@ mod switch;
 mod task;
 
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::{MapPermission, VirtAddr};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
@@ -133,6 +134,20 @@ impl TaskManager {
         inner.tasks[cur].change_program_brk(size)
     }
 
+    /// 当前任务 mmap
+    pub fn change_current_mmap(&self, start: VirtAddr, end: VirtAddr, permission: MapPermission) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.tasks[cur].mmap(start, end, permission)
+    }
+
+    /// 当前任务 munmap
+    pub fn change_current_munmap(&self, start: VirtAddr, end: VirtAddr) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.tasks[cur].munmap(start, end)
+    }
+
     /// Switch current `Running` task to the task we have found,
     /// or there is no `Ready` task and we can exit with all applications completed
     fn run_next_task(&self) {
@@ -201,4 +216,28 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// 当前任务 mmap
+pub fn current_mmap(start: VirtAddr, end: VirtAddr, permission: MapPermission) -> isize {
+    TASK_MANAGER.change_current_mmap(start, end, permission)
+}
+
+/// 当前任务 munmap
+pub fn current_munmap(start: VirtAddr, end: VirtAddr) -> isize {
+    TASK_MANAGER.change_current_munmap(start, end)
+}
+
+/// 增加当前任务的某个系统调用的调用次数
+pub fn increase_syscall_count(syscall_id: usize) {
+    let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let current = inner.current_task;
+    inner.tasks[current].syscall_times[syscall_id] += 1;
+}
+
+/// 获取当前任务的某个系统调用的调用次数
+pub fn get_syscall_count(syscall_id: usize) -> u32 {
+    let inner = TASK_MANAGER.inner.exclusive_access();
+    let current = inner.current_task;
+    inner.tasks[current].syscall_times[syscall_id]
 }

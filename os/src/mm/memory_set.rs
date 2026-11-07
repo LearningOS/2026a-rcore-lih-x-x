@@ -262,6 +262,33 @@ impl MemorySet {
             false
         }
     }
+    /// 检查 [start_vpn, end_vpn) 是否与已有区域重叠
+    pub fn overlap(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
+        self.areas.iter().any(|area| {
+            let a_start = area.vpn_range.get_start();
+            let a_end = area.vpn_range.get_end();
+            start_vpn < a_end && a_start < end_vpn
+        })
+    }
+    /// 解除 [start, end) 范围的映射（要求范围正好匹配某个 area）
+    pub fn remove_area(&mut self, start: VirtAddr, end: VirtAddr) -> bool {
+        let start_vpn = start.floor();
+        let end_vpn = end.ceil();
+        let mut idx = None;
+        for (i, area) in self.areas.iter().enumerate() {
+            if area.vpn_range.get_start() == start_vpn && area.vpn_range.get_end() == end_vpn {
+                idx = Some(i);
+                break;
+            }
+        }
+        if let Some(i) = idx {
+            self.areas[i].unmap(&mut self.page_table);
+            self.areas.remove(i);
+            true
+        } else {
+            false
+        }
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
