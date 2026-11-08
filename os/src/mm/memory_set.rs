@@ -66,6 +66,14 @@ impl MemorySet {
             None,
         );
     }
+    /// 检查 [start_vpn, end_vpn) 是否与已有区域重叠
+    pub fn overlap(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
+        self.areas.iter().any(|area| {
+            let a_start = area.vpn_range.get_start();
+            let a_end = area.vpn_range.get_end();
+            start_vpn < a_end && a_start < end_vpn
+        })
+    }
     /// remove a area
     pub fn remove_area_with_start_vpn(&mut self, start_vpn: VirtPageNum) {
         if let Some((idx, area)) = self
