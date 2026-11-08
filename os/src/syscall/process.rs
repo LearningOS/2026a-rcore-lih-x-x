@@ -1,9 +1,10 @@
 use crate::{
+    config::PAGE_SIZE,
     fs::{open_file, OpenFlags},
-    mm::{translated_ref, translated_refmut, translated_str},
+    mm::{translated_ref, translated_refmut, translated_str, MapPermission, VirtAddr},
     task::{
         current_process, current_task, current_user_token, exit_current_and_run_next, pid2process,
-        suspend_current_and_run_next, SignalFlags,
+        suspend_current_and_run_next, ProcessControlBlock, SignalFlags,
     },
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
@@ -151,34 +152,75 @@ pub fn sys_kill(pid: usize, signal: u32) -> isize {
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_get_time",
         current_task().unwrap().process.upgrade().unwrap().getpid()
     );
-    -1
+    let us = crate::timer::get_time_us();
+    *translated_refmut(current_user_token(), ts) = TimeVal {
+        sec: us / 1_000_000,
+        usec: us % 1_000_000,
+    };
+    0
 }
 
 /// mmap syscall
 ///
 /// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
+pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
     trace!(
-        "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_mmap",
         current_task().unwrap().process.upgrade().unwrap().getpid()
     );
-    -1
+    if start % PAGE_SIZE != 0 {
+        return -1;
+    }
+    if port & !0x7 != 0 || port == 0 {
+        return -1;
+    }
+    let mut perm = MapPermission::U;
+    if port & 1 != 0 {
+        perm |= MapPermission::R;
+    }
+    if port & 2 != 0 {
+        perm |= MapPermission::W;
+    }
+    if port & 4 != 0 {
+        perm |= MapPermission::X;
+    }
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+    let start_vpn = VirtAddr::from(start).floor();
+    let end_vpn = VirtAddr::from(start + len).ceil();
+    if inner.memory_set.overlap(start_vpn, end_vpn) {
+        return -1;
+    }
+    inner.memory_set.insert_framed_area(
+        VirtAddr::from(start),
+        VirtAddr::from(start + len),
+        perm,
+    );
+    0
 }
 
 /// munmap syscall
 ///
 /// YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
+pub fn sys_munmap(start: usize, len: usize) -> isize {
     trace!(
-        "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_munmap",
         current_task().unwrap().process.upgrade().unwrap().getpid()
     );
-    -1
+    if start % PAGE_SIZE != 0 || len % PAGE_SIZE != 0 {
+        return -1;
+    }
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+    inner
+        .memory_set
+        .remove_area_with_start_vpn(VirtAddr::from(start).floor());
+    0
 }
 
 /// change data segment size
@@ -193,21 +235,41 @@ pub fn sys_munmap(_start: usize, _len: usize) -> isize {
 /// spawn syscall
 /// YOUR JOB: Implement spawn.
 /// HINT: fork + exec =/= spawn
-pub fn sys_spawn(_path: *const u8) -> isize {
+pub fn sys_spawn(path: *const u8) -> isize {
     trace!(
-        "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_spawn",
         current_task().unwrap().process.upgrade().unwrap().getpid()
     );
-    -1
+    let token = current_user_token();
+    let path = translated_str(token, path);
+    if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
+        let all_data = app_inode.read_all();
+        let new_process = ProcessControlBlock::new(all_data.as_slice());
+        let new_pid = new_process.getpid();
+        // 建立父子关系
+        let parent = current_process();
+        new_process.inner_exclusive_access().parent = Some(Arc::downgrade(&parent));
+        let mut parent_inner = parent.inner_exclusive_access();
+        parent_inner.children.push(new_process.clone());
+        drop(parent_inner);
+        new_pid as isize
+    } else {
+        -1
+    }
 }
 
 /// set priority syscall
 ///
 /// YOUR JOB: Set task priority
-pub fn sys_set_priority(_prio: isize) -> isize {
+pub fn sys_set_priority(prio: isize) -> isize {
     trace!(
-        "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_set_priority",
         current_task().unwrap().process.upgrade().unwrap().getpid()
     );
-    -1
+    // ch8 用 FIFO 调度，不做 stride；仅校验 priority 并返回
+    if prio < 2 {
+        -1
+    } else {
+        prio
+    }
 }
